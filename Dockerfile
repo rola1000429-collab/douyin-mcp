@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY server.js douyin.js ./
+COPY server.js douyin.js screenshotStore.js ./
 
 ENV PORT=3000
 EXPOSE 3000
