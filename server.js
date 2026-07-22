@@ -139,18 +139,34 @@ app.use(express.json());
 // header 要帶 X-Ingest-Token，跟 Render 環境變數 INGEST_TOKEN 一致，
 // 不然任何人都能對這個公開網址亂塞資料。
 app.post("/ingest/screenshot", (req, res) => {
+  console.log("[ingest] 收到 POST 請求");
+  console.log("[ingest] headers:", req.headers);
+  console.log("[ingest] body:", JSON.stringify(req.body));
+
   if (INGEST_TOKEN && req.headers["x-ingest-token"] !== INGEST_TOKEN) {
+    console.log("[ingest] ❌ token 驗證失敗", {
+      expected: INGEST_TOKEN,
+      received: req.headers["x-ingest-token"],
+    });
     res.status(401).json({ error: "unauthorized" });
     return;
   }
 
   const { text } = req.body || {};
   if (!text || typeof text !== "string") {
+    console.log("[ingest] ❌ text 缺失或格式錯誤", {
+      textType: typeof text,
+      text: text?.slice?.(0, 100),
+    });
     res.status(400).json({ error: "missing text" });
     return;
   }
 
   const record = saveScreenshotText(text);
+  console.log("[ingest] ✅ 成功保存", {
+    textLength: text.length,
+    receivedAt: record.receivedAt,
+  });
   res.json({ ok: true, receivedAt: record.receivedAt });
 });
 
@@ -213,4 +229,5 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`douyin-mcp listening on port ${PORT}`);
+  console.log(`INGEST_TOKEN 設定: ${INGEST_TOKEN ? "✅ 有設定" : "⚠️ 未設定"}`);
 });
