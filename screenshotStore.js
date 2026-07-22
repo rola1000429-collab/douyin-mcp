@@ -2,36 +2,63 @@ import fs from "node:fs";
 import path from "node:path";
 
 // ---------------------------------------------------------------
-// 簡單的持久化儲存：存放「手機那端截圖 → OCR → 上傳」的最新一筆文字。
-// 用一個 JSON 檔存在磁碟上（跟 douyin.js 的 browser-profile 同一個
-// data 目錄邏輯），Render 免費方案硬碟是暫時性的，服務重啟後可能會
-// 不見，但這個功能本來就只需要「最新一筆」，重啟後空的也沒關係，
-// 手機那邊下次截圖又會補上新的一筆。
+// 改进版：保存「图片」而不是文字
+// 接收来自手机的截图 base64 → 保存到磁盘
+// AI 用 MCP tool 读取时，直接返回图片给 Claude 识图
 // ---------------------------------------------------------------
 
-const STORE_FILE = path.join(process.cwd(), "data", "latest-screenshot.json");
+const STORE_DIR = path.join(process.cwd(), "data", "screenshots");
+const METADATA_FILE = path.join(STORE_DIR, "latest.json");
 
 function ensureDir() {
-  fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
+  fs.mkdirSync(STORE_DIR, { recursive: true });
 }
 
-/** 手機捷徑 OCR 完文字後呼叫這個，存起來 */
-export function saveScreenshotText(text) {
+/** 手机端上传图片的 base64 后调用这个，保存图片 */
+export function saveScreenshot(imageBase64) {
   ensureDir();
+  
+  // 用时间戳作为文件名
+  const timestamp = Date.now();
+  const filename = `screenshot-${timestamp}.png`;
+  const filepath = path.join(STORE_DIR, filename);
+  
+  // 把 base64 转成 Buffer 保存为 PNG 文件
+  const buffer = Buffer.from(imageBase64, "base64");
+  fs.writeFileSync(filepath, buffer);
+  
+  // 保存元数据（方便查询最新一张）
   const record = {
-    text,
+    filename,
+    filepath: `/data/screenshots/${filename}`,
+    base64: imageBase64, // 也保存 base64 以便直接返回给 AI
     receivedAt: new Date().toISOString(),
+    timestamp,
   };
-  fs.writeFileSync(STORE_FILE, JSON.stringify(record, null, 2), "utf-8");
+  
+  fs.writeFileSync(METADATA_FILE, JSON.stringify(record, null, 2), "utf-8");
+  
   return record;
 }
 
-/** AI 呼叫 MCP tool 時讀這個，拿最新一筆。還沒有任何上傳紀錄就回傳 null */
+/** AI 调用 MCP tool 时读这个，返回最新一张图片的 base64 */
 export function getLatestScreenshot() {
   try {
-    const raw = fs.readFileSync(STORE_FILE, "utf-8");
-    return JSON.parse(raw);
+    const raw = fs.readFileSync(METADATA_FILE, "utf-8");
+    const record = JSON.parse(raw);
+    return record; // 返回 {filename, base64, receivedAt, ...}
   } catch {
-    return null;
+    return null; // 还没有上传过
+  }
+}
+
+/** 获取所有截图文件列表（可选，用来查看历史） */
+export function listScreenshots() {
+  try {
+    ensureDir();
+    const files = fs.readdirSync(STORE_DIR).filter(f => f.startsWith("screenshot-"));
+    return files.sort().reverse(); // 最新的在前
+  } catch {
+    return [];
   }
 }

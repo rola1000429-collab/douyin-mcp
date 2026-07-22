@@ -11,27 +11,15 @@ import {
   scrollPrev,
   getPageDebug,
 } from "./douyin.js";
-import { saveScreenshotText, getLatestScreenshot } from "./screenshotStore.js";
+import { saveScreenshot, getLatestScreenshot } from "./screenshotStore.js";
 
 // ---------------------------------------------------------------
-// v2：接上真正的抖音網頁版（Playwright），不再是假資料。
-// 第一次使用流程：
-// 1. 呼叫 get_login_status 確認是否已登入
-// 2. 若未登入，呼叫 get_login_qr 取得 QR code 截圖，用手機抖音 App 掃碼
-// 3. 登入後再呼叫 get_login_status 確認，之後就能用 get_current_video 等工具
-//
-// 如果 get_current_video 抓到的內容看起來不準，呼叫 get_page_debug
-// 把畫面文字內容印出來，回報給開發者調整讀取邏輯。
-//
-// v2.2 新增：手機 App 版本抖音讀取
-// 因為 iOS 系統限制，這個伺服器沒辦法背景讀取手機抖音 App 畫面
-// （那是網頁版 Playwright 在做的事，跟手機 App 是兩回事）。
-// 改成手機那邊用 iOS 捷徑「螢幕截圖 → OCR → POST 上傳」把文字傳過來，
-// AI 再用 get_latest_screenshot 這個 tool 讀最新一筆。
+// v3：改为接收「图片」而不是文字
+// 手机端：截图 → base64 → POST 图片
+// 后端：保存图片 → MCP tool 返回图片给 Claude
+// Claude：直接看图片识图，不需要先 OCR
 // ---------------------------------------------------------------
 
-// 保護 /ingest/screenshot 這個公開端點用的簡單 token，
-// 部署時要在 Render 環境變數設 INGEST_TOKEN，跟 iOS 捷徑裡填的要一致。
 const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 
 function createMcpServer() {
@@ -117,14 +105,32 @@ function createMcpServer() {
 
   server.tool(
     "get_latest_screenshot",
-    "取得使用者手機上最近一次截圖並 OCR 後上傳的文字內容（例如手機抖音 App 畫面），" +
-      "回傳的 text 是 OCR 出來的原始文字、receivedAt 是上傳時間。" +
+    "取得使用者手機上最近一次截圖上傳的「圖片」（可以直接看，不是文字）。" +
+      "回傳的是圖片本身，Claude 會直接進行視覺識別、分析你在看什麼影片。" +
       "如果從來沒有上傳過會回傳 null，代表使用者還沒用手機截圖過。",
     {},
     async () => {
       const record = getLatestScreenshot();
+      
+      if (!record) {
+        return {
+          content: [{ type: "text", text: "還沒有上傳過任何截圖" }],
+        };
+      }
+      
+      // 直接回傳圖片給 Claude（base64 格式），Claude 會做視覺識別
       return {
-        content: [{ type: "text", text: JSON.stringify(record, null, 2) }],
+        content: [
+          { 
+            type: "image", 
+            data: record.base64, 
+            mimeType: "image/png" 
+          },
+          { 
+            type: "text", 
+            text: `上傳時間：${record.receivedAt}` 
+          },
+        ],
       };
     }
   );
@@ -133,15 +139,16 @@ function createMcpServer() {
 }
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "50mb" })); // 允許大的 base64 圖片
 
-// 手機端 iOS 捷徑：螢幕截圖 → OCR → POST 這裡，把文字傳上來。
-// header 要帶 X-Ingest-Token，跟 Render 環境變數 INGEST_TOKEN 一致，
-// 不然任何人都能對這個公開網址亂塞資料。
+// 手機端 iOS 捷徑：螢幕截圖 → base64 → POST 這裡
+// 改為接收「image」字段（base64），而不是「text」
 app.post("/ingest/screenshot", (req, res) => {
   console.log("[ingest] 收到 POST 請求");
-  console.log("[ingest] headers:", req.headers);
-  console.log("[ingest] body:", JSON.stringify(req.body));
+  console.log("[ingest] headers:", {
+    contentType: req.headers["content-type"],
+    hasToken: !!req.headers["x-ingest-token"],
+  });
 
   if (INGEST_TOKEN && req.headers["x-ingest-token"] !== INGEST_TOKEN) {
     console.log("[ingest] ❌ token 驗證失敗", {
@@ -152,22 +159,32 @@ app.post("/ingest/screenshot", (req, res) => {
     return;
   }
 
-  const { text } = req.body || {};
-  if (!text || typeof text !== "string") {
-    console.log("[ingest] ❌ text 缺失或格式錯誤", {
-      textType: typeof text,
-      text: text?.slice?.(0, 100),
+  const { image } = req.body || {};
+  if (!image || typeof image !== "string") {
+    console.log("[ingest] ❌ image 缺失或格式錯誤", {
+      imageType: typeof image,
+      imageLength: image?.length,
     });
-    res.status(400).json({ error: "missing text" });
+    res.status(400).json({ error: "missing image (base64 string)" });
     return;
   }
 
-  const record = saveScreenshotText(text);
-  console.log("[ingest] ✅ 成功保存", {
-    textLength: text.length,
-    receivedAt: record.receivedAt,
-  });
-  res.json({ ok: true, receivedAt: record.receivedAt });
+  try {
+    const record = saveScreenshot(image);
+    console.log("[ingest] ✅ 成功保存圖片", {
+      filename: record.filename,
+      size: image.length,
+      receivedAt: record.receivedAt,
+    });
+    res.json({ 
+      ok: true, 
+      filename: record.filename,
+      receivedAt: record.receivedAt 
+    });
+  } catch (err) {
+    console.error("[ingest] ❌ 保存圖片失敗:", err.message);
+    res.status(500).json({ error: "failed to save image" });
+  }
 });
 
 // 用 session id 對應每個 client 連線自己的 transport / server 實例
@@ -230,4 +247,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`douyin-mcp listening on port ${PORT}`);
   console.log(`INGEST_TOKEN 設定: ${INGEST_TOKEN ? "✅ 有設定" : "⚠️ 未設定"}`);
+  console.log(`支持图片上传: ✅ POST /ingest/screenshot`);
 });
