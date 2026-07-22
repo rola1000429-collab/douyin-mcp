@@ -8,14 +8,57 @@ import fs from "node:fs";
 // 2. 打開抖音網頁版
 // 3. 提供讀取「目前畫面上影片」、上下滑動、按讚等操作
 //
-// 重要提醒：因為開發時無法即時連線到真正的抖音網頁版做對照，
-// 下面讀取影片資訊的選擇器（selector）是「盡力猜測」的版本，
-// 部署後如果讀不到正確資訊，用 getPageDebug() 這個除錯工具
-// 把畫面文字內容印出來，再回頭調整 extractVideoInfo() 裡的邏輯。
+// v2.1 更新：
+// 根據實際部署後 get_page_debug 抓到的畫面文字（douyin.com/jingxuan
+// 精選頁）發現，這個頁面是「卡片列表」而不是單支影片全螢幕播放，
+// 而且沒有原本猜測的 data-e2e 屬性或 class（.author-name 等都不存在），
+// 所以原本用 DOM selector 抓 author/title/likes 的方式一律抓到 null。
+//
+// 實際畫面的純文字內容（page.innerText("body")）是這樣排列的，
+// 每一支影片卡片對應五行、循環出現：
+//   {時長 mm:ss}
+//   {讚數，如 12.0万 或 2665}
+//   {影片描述文字，通常帶 #hashtag}
+//   @{作者}
+//   ·{日期，如 4月28日 / 2天前}
+// 下一支影片的「時長」緊接著上一支的「日期」出現。
+//
+// 所以改用文字規則（regex）去解析，而不是找不存在的 DOM selector。
+// 抓到的第一個符合規則的區塊，視為「目前使用者所在的影片」。
 // -----------------------------------------------------------------
 
 const PROFILE_DIR = path.join(process.cwd(), "data", "browser-profile");
 const DOUYIN_URL = "https://www.douyin.com";
+
+// 一支影片卡片的文字規則：時長 \n 讚數 \n 描述 \n @作者 \n ·日期
+// - 時長: 1~2 位數:2 位數，例如 03:37 / 14:38
+// - 讚數: 數字，可能帶小數與「万」，例如 12.0万 / 2665
+// - 描述: 該行不會是空行，且不會以 @ 開頭（避免誤吃到作者那行）
+// - 作者: @ 後面到換行前的內容
+// - 日期: · 後面（中間可能有/沒有空白）到換行前的內容
+const VIDEO_BLOCK_RE =
+  /(\d{1,2}:\d{2})\n([\d.]+万|\d+)\n([^\n@][^\n]*)\n@([^\n]+)\n·\s*([^\n]+)/;
+
+/** 從整段畫面文字裡，解析出「第一支」影片卡片的資訊。
+ *  抓不到就回傳 null，呼叫端會補上 null 欄位，
+ *  之後如果這個規則又對不上新的畫面結構，
+ *  用 getPageDebug() 印出的內容重新調整上面這個 regex 即可，
+ *  外部的 get_current_video / scroll_next / scroll_prev 介面都不用變。 */
+function extractVideoInfo(bodyText) {
+  if (!bodyText) return null;
+
+  const match = bodyText.match(VIDEO_BLOCK_RE);
+  if (!match) return null;
+
+  const [, duration, likes, title, author, date] = match;
+  return {
+    author: author.trim(),
+    title: title.trim(),
+    likes: likes.trim(),
+    duration: duration.trim(),
+    date: date.trim(),
+  };
+}
 
 let context = null;
 let page = null;
@@ -55,43 +98,22 @@ export async function getLoginQrScreenshot() {
   return buffer.toString("base64");
 }
 
-/** 嘗試從畫面上擷取目前影片的資訊。
- *  這裡先抓「畫面可見範圍內」的文字內容，回傳一段精簡過的摘要，
- *  等實際部署後看抓到的內容準不準，再改成更精確的 DOM selector。 */
+/** 讀取目前畫面上第一支影片卡片的資訊（作者、描述、讚數、時長、日期）。
+ *  改用整頁文字 + regex 解析，不再依賴不存在的 DOM selector。 */
 export async function getCurrentVideo() {
   await ensureBrowser();
 
-  const info = await page.evaluate(() => {
-    function firstVisibleText(selectors) {
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el && el.innerText && el.innerText.trim()) {
-          return el.innerText.trim();
-        }
-      }
-      return null;
-    }
+  const bodyText = await page.innerText("body").catch(() => "");
+  const video = extractVideoInfo(bodyText);
 
-    // 這些 class/selector 是常見命名的猜測，之後要對照真實畫面調整
-    const author = firstVisibleText([
-      '[data-e2e="video-author-name"]',
-      ".author-name",
-      "a[href*='/user/']",
-    ]);
-    const title = firstVisibleText([
-      '[data-e2e="video-desc"]',
-      ".video-desc",
-      ".desc",
-    ]);
-    const likes = firstVisibleText([
-      '[data-e2e="like-count"]',
-      ".like-count",
-    ]);
-
-    return { author, title, likes, pageTitle: document.title };
-  });
-
-  return info;
+  return {
+    author: video?.author ?? null,
+    title: video?.title ?? null,
+    likes: video?.likes ?? null,
+    duration: video?.duration ?? null,
+    date: video?.date ?? null,
+    pageTitle: await page.title(),
+  };
 }
 
 /** 往下滑到下一支影片：抖音網頁版通常支援方向鍵 */
@@ -109,7 +131,7 @@ export async function scrollPrev() {
   return getCurrentVideo();
 }
 
-/** 除錯用：把目前畫面的文字內容印出一部分，方便對照調整 selector */
+/** 除錯用：把目前畫面的文字內容印出一部分，方便對照調整 regex */
 export async function getPageDebug() {
   await ensureBrowser();
   const text = await page.innerText("body").catch((e) => `讀取失敗: ${e.message}`);
