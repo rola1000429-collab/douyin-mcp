@@ -28,7 +28,10 @@ import fs from "node:fs";
 // -----------------------------------------------------------------
 
 const PROFILE_DIR = path.join(process.cwd(), "data", "browser-profile");
-const DOUYIN_URL = "https://www.douyin.com";
+// 注意：一定要用精選頁 /jingxuan，不能只用首頁 www.douyin.com——
+// 首頁的畫面文字排版跟精選頁完全不同，下面的 extractVideoInfo
+// 是對照精選頁的畫面結構寫的，接到首頁會整個抓不到東西。
+const DOUYIN_URL = "https://www.douyin.com/jingxuan";
 
 // 一支影片卡片的文字規則：時長 \n 讚數 \n 描述 \n @作者 \n ·日期
 // - 時長: 1~2 位數:2 位數，例如 03:37 / 14:38
@@ -79,6 +82,16 @@ async function ensureBrowser() {
   await page.goto(DOUYIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
 }
 
+/** 有些情況下（例如登入後網站自動跳轉、或之前手動導覽過其他頁面），
+ *  持久化 context 重新連上時可能不是停在精選頁。
+ *  讀取影片資訊前先確認網址還在 /jingxuan，不是的話重新導過去，
+ *  避免又拿到跟解析規則對不上的頁面（例如首頁）。 */
+async function ensureOnJingxuan() {
+  if (!page.url().includes("/jingxuan")) {
+    await page.goto(DOUYIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  }
+}
+
 /** 判斷目前是否已登入。用「有沒有出現登入/掃碼相關文字」粗略判斷，
  *  之後如果誤判，可以用 getPageDebug() 觀察實際畫面文字再調整關鍵字。 */
 export async function getLoginStatus() {
@@ -102,6 +115,7 @@ export async function getLoginQrScreenshot() {
  *  改用整頁文字 + regex 解析，不再依賴不存在的 DOM selector。 */
 export async function getCurrentVideo() {
   await ensureBrowser();
+  await ensureOnJingxuan();
 
   const bodyText = await page.innerText("body").catch(() => "");
   const video = extractVideoInfo(bodyText);

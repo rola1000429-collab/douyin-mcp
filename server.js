@@ -11,6 +11,7 @@ import {
   scrollPrev,
   getPageDebug,
 } from "./douyin.js";
+import { saveScreenshotText, getLatestScreenshot } from "./screenshotStore.js";
 
 // ---------------------------------------------------------------
 // v2：接上真正的抖音網頁版（Playwright），不再是假資料。
@@ -21,12 +22,22 @@ import {
 //
 // 如果 get_current_video 抓到的內容看起來不準，呼叫 get_page_debug
 // 把畫面文字內容印出來，回報給開發者調整讀取邏輯。
+//
+// v2.2 新增：手機 App 版本抖音讀取
+// 因為 iOS 系統限制，這個伺服器沒辦法背景讀取手機抖音 App 畫面
+// （那是網頁版 Playwright 在做的事，跟手機 App 是兩回事）。
+// 改成手機那邊用 iOS 捷徑「螢幕截圖 → OCR → POST 上傳」把文字傳過來，
+// AI 再用 get_latest_screenshot 這個 tool 讀最新一筆。
 // ---------------------------------------------------------------
+
+// 保護 /ingest/screenshot 這個公開端點用的簡單 token，
+// 部署時要在 Render 環境變數設 INGEST_TOKEN，跟 iOS 捷徑裡填的要一致。
+const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 
 function createMcpServer() {
   const server = new McpServer({
     name: "douyin-mcp",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 
   server.tool(
@@ -104,11 +115,44 @@ function createMcpServer() {
     }
   );
 
+  server.tool(
+    "get_latest_screenshot",
+    "取得使用者手機上最近一次截圖並 OCR 後上傳的文字內容（例如手機抖音 App 畫面），" +
+      "回傳的 text 是 OCR 出來的原始文字、receivedAt 是上傳時間。" +
+      "如果從來沒有上傳過會回傳 null，代表使用者還沒用手機截圖過。",
+    {},
+    async () => {
+      const record = getLatestScreenshot();
+      return {
+        content: [{ type: "text", text: JSON.stringify(record, null, 2) }],
+      };
+    }
+  );
+
   return server;
 }
 
 const app = express();
 app.use(express.json());
+
+// 手機端 iOS 捷徑：螢幕截圖 → OCR → POST 這裡，把文字傳上來。
+// header 要帶 X-Ingest-Token，跟 Render 環境變數 INGEST_TOKEN 一致，
+// 不然任何人都能對這個公開網址亂塞資料。
+app.post("/ingest/screenshot", (req, res) => {
+  if (INGEST_TOKEN && req.headers["x-ingest-token"] !== INGEST_TOKEN) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+
+  const { text } = req.body || {};
+  if (!text || typeof text !== "string") {
+    res.status(400).json({ error: "missing text" });
+    return;
+  }
+
+  const record = saveScreenshotText(text);
+  res.json({ ok: true, receivedAt: record.receivedAt });
+});
 
 // 用 session id 對應每個 client 連線自己的 transport / server 實例
 const transports = {};
@@ -134,6 +178,10 @@ app.post("/mcp", async (req, res) => {
     const server = createMcpServer();
     await server.connect(transport);
   } else {
+    console.warn(
+      `[mcp] 收到無效 session 請求 (sessionId=${sessionId ?? "none"})，` +
+        `可能是 server 剛重啟、Kelivo 那邊還在用舊的連線，請在 Kelivo 開新對話再試一次`
+    );
     res.status(400).json({
       jsonrpc: "2.0",
       error: { code: -32000, message: "Bad Request: no valid session" },
