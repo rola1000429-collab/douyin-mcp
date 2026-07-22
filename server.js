@@ -3,95 +3,103 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
+import {
+  getLoginStatus,
+  getLoginQrScreenshot,
+  getCurrentVideo,
+  scrollNext,
+  scrollPrev,
+  getPageDebug,
+} from "./douyin.js";
 
 // ---------------------------------------------------------------
-// 這裡先放「假資料」版本的 tools，目的是先確認：
-// Kelivo -> 這個 server 的連線、tool 呼叫流程能跑通。
-// 之後要接抖音時，把 getCurrentVideo() / scrollNext() 內部邏輯
-// 換成真正的 Playwright 操作即可，tool 的介面不用變。
+// v2：接上真正的抖音網頁版（Playwright），不再是假資料。
+// 第一次使用流程：
+// 1. 呼叫 get_login_status 確認是否已登入
+// 2. 若未登入，呼叫 get_login_qr 取得 QR code 截圖，用手機抖音 App 掃碼
+// 3. 登入後再呼叫 get_login_status 確認，之後就能用 get_current_video 等工具
+//
+// 如果 get_current_video 抓到的內容看起來不準，呼叫 get_page_debug
+// 把畫面文字內容印出來，回報給開發者調整讀取邏輯。
 // ---------------------------------------------------------------
 
 function createMcpServer() {
   const server = new McpServer({
     name: "douyin-mcp",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
-  // 假資料：目前畫面上的影片
-  let mockIndex = 0;
-  const mockFeed = [
-    { author: "旅行的貓", title: "京都晚秋的小巷", likes: 12000, tags: ["旅行", "京都"] },
-    { author: "煮飯阿姨", title: "10分鐘家常滷肉飯", likes: 34000, tags: ["料理", "家常菜"] },
-    { author: "健身狂", title: "在家徒手訓練菜單", likes: 8900, tags: ["健身", "居家運動"] },
-  ];
+  server.tool(
+    "get_login_status",
+    "檢查目前抖音網頁版是否已登入",
+    {},
+    async () => {
+      const status = await getLoginStatus();
+      return {
+        content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "get_login_qr",
+    "取得目前畫面截圖（通常畫面上會有登入用的 QR code），用手機抖音 App 掃描即可登入",
+    {},
+    async () => {
+      const base64 = await getLoginQrScreenshot();
+      return {
+        content: [
+          { type: "image", data: base64, mimeType: "image/png" },
+          { type: "text", text: "請用手機抖音 App 掃描這張截圖裡的 QR code 完成登入" },
+        ],
+      };
+    }
+  );
 
   server.tool(
     "get_current_video",
-    "取得目前抖音畫面上正在播放的影片資訊（作者、標題、讚數、標籤）",
+    "取得目前抖音網頁版畫面上正在播放的影片資訊（作者、標題、讚數）",
     {},
     async () => {
-      const video = mockFeed[mockIndex];
+      const video = await getCurrentVideo();
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(video, null, 2),
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(video, null, 2) }],
       };
     }
   );
 
   server.tool(
     "scroll_next",
-    "模擬往下滑到下一支抖音影片",
+    "往下滑到下一支抖音影片，並回傳新影片資訊",
     {},
     async () => {
-      mockIndex = (mockIndex + 1) % mockFeed.length;
-      const video = mockFeed[mockIndex];
+      const video = await scrollNext();
       return {
-        content: [
-          {
-            type: "text",
-            text: `已滑到下一支影片:\n${JSON.stringify(video, null, 2)}`,
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(video, null, 2) }],
       };
     }
   );
 
   server.tool(
     "scroll_prev",
-    "模擬往上滑回上一支抖音影片",
+    "往上滑回上一支抖音影片，並回傳新影片資訊",
     {},
     async () => {
-      mockIndex = (mockIndex - 1 + mockFeed.length) % mockFeed.length;
-      const video = mockFeed[mockIndex];
+      const video = await scrollPrev();
       return {
-        content: [
-          {
-            type: "text",
-            text: `已回到上一支影片:\n${JSON.stringify(video, null, 2)}`,
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(video, null, 2) }],
       };
     }
   );
 
   server.tool(
-    "like_video",
-    "對目前這支影片按讚（假資料版本，之後接真的 Playwright 操作）",
-    { confirm: z.boolean().describe("是否確認要按讚") },
-    async ({ confirm }) => {
-      if (!confirm) {
-        return { content: [{ type: "text", text: "未確認，取消按讚" }] };
-      }
-      const video = mockFeed[mockIndex];
+    "get_page_debug",
+    "除錯用：印出目前頁面網址、標題、畫面文字內容片段，用來確認讀取邏輯抓得準不準",
+    {},
+    async () => {
+      const debug = await getPageDebug();
       return {
-        content: [
-          { type: "text", text: `已幫「${video.title}」按讚 (假資料，尚未接上真實抖音)` },
-        ],
+        content: [{ type: "text", text: JSON.stringify(debug, null, 2) }],
       };
     }
   );

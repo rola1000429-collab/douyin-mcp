@@ -1,41 +1,37 @@
-# douyin-mcp（骨架版）
+# douyin-mcp（v2：接上真的抖音網頁版）
 
-這是一個 MCP server 骨架，目前 tool 回傳的是**假資料**，
-目的是先確認「Kelivo -> 這台 server」的連線流程能跑通，
-之後再把假資料換成真正的 Playwright + 抖音操作。
+## 新增的 tools
 
-## 目前提供的 tools
+- `get_login_status`：檢查是否已登入
+- `get_login_qr`：截圖目前畫面（含登入用 QR code），回傳圖片給你掃
+- `get_current_video`：讀取目前畫面上的影片資訊
+- `scroll_next` / `scroll_prev`：上下滑動並回傳新影片資訊
+- `get_page_debug`：除錯用，印出畫面文字內容，抓不準時用這個回報調整
 
-- `get_current_video`：回傳目前「畫面上」影片資訊（假資料）
-- `scroll_next` / `scroll_prev`：切換到下一支/上一支（假資料）
-- `like_video`：模擬按讚（假資料，需要 confirm=true）
+## 第一次使用流程
 
-## 用手機部署（不需要電腦）
+1. 部署更新後，在 Kelivo 跟 AI 說「幫我看抖音登入了沒」
+   → AI 會呼叫 `get_login_status`
+2. 如果顯示未登入，跟 AI 說「給我看登入畫面」
+   → AI 會呼叫 `get_login_qr`，你會在對話裡看到一張截圖
+3. 用手機抖音 App 掃描截圖裡的 QR code 完成登入
+4. 再問一次「幫我看抖音在滑什麼」，這時應該就會呼叫 `get_current_video`
 
-1. 到 GitHub，用手機瀏覽器建立一個新 repo（例如 `douyin-mcp`）。
-2. 把這個資料夾裡的 4 個檔案（package.json / server.js / Dockerfile / README.md）
-   透過 GitHub 網頁的「Add file → Upload files」上傳上去。
-3. 到 [Railway](https://railway.app) 或 [Render](https://render.com)，
-   用 GitHub 帳號登入，選 "New Project / New Web Service" -> 連接剛剛那個 repo。
-   兩者都會自動偵測到 Dockerfile 並建置部署。
-4. 部署完成後，平台會給你一個網址，例如：
-   `https://douyin-mcp-production.up.railway.app`
-5. 這個 server 的 MCP endpoint 是：
-   `https://你的網址/mcp`
+## 已知限制
 
-## 在 Kelivo 設定
+- **Render 免費方案硬碟是暫時性的**：如果服務長時間閒置被喚醒重啟，登入的 session
+  可能會不見，需要重新掃碼登入一次。
+- **免費方案記憶體只有 512MB**：headless Chromium + Node 一起跑可能會偏緊，
+  如果常常沒回應或當掉，可能需要升級 Render 方案，或改用資源更多的平台。
+- **讀取影片資訊的邏輯是「先猜測」版本**：因為開發時無法即時連線抖音網頁版
+  對照畫面結構，`get_current_video` 抓到的內容如果是空的或不準，
+  請呼叫 `get_page_debug`，把回傳的內容截圖/複製給開發者，
+  再調整 `douyin.js` 裡 `extractVideoInfo` 的邏輯即可，介面不用變。
 
-1. 打開 Kelivo -> 設定 -> MCP（工具）
-2. 新增一個 MCP Server
-3. 類型選 HTTP / Streamable HTTP
-4. URL 填：`https://你的網址/mcp`
-5. 儲存後，跟 AI 對話時應該就能看到 `get_current_video` 等 4 個工具可以被呼叫
+## 更新部署步驟
 
-## 之後要接真的抖音時
-
-把 `server.js` 裡 `createMcpServer()` 內的假資料邏輯，
-換成 Playwright 操作抖音網頁版的邏輯即可，
-四個 tool 的名稱、輸入輸出格式都不用改，Kelivo 那邊也不用重新設定。
-這部分需要額外加 Playwright 依賴，並且在 Dockerfile 裡加裝瀏覽器套件
-（`npx playwright install --with-deps chromium`），Docker image 會變大很多，
-之後我可以幫你補上這個版本。
+1. 到 GitHub 這個 repo，把 `server.js`、`douyin.js`、`package.json`、`Dockerfile`
+   四個檔案上傳（`douyin.js` 是新檔案，其他三個是取代舊的）
+2. Render 會偵測到 repo 有更新，自動重新建置部署
+   （這次因為要多裝 Chromium，建置時間會明顯變長，可能 5-10 分鐘）
+3. 建置完成後流程同上面「第一次使用流程」
